@@ -1,12 +1,15 @@
 package blockchain
 
 import (
+	"bytes"
 	"crypto/sha256"
-	"encoding/json"
+	"encoding/gob"
+	"encoding/hex"
 	"fmt"
+	"log"
 )
 
-const subsidy = 1
+const subsidy = 10
 
 // Transaction 一次交易包含的值
 type Transaction struct {
@@ -19,14 +22,21 @@ type Transaction struct {
 }
 
 func (t *Transaction) SetID() {
+	var encoded bytes.Buffer
 	var hash [32]byte
-	txCopy := t
-	txCopy.ID = nil
 
-	// 计算交易的hash值
-	data, _ := json.Marshal(t)
-	hash = sha256.Sum256(data)
+	enc := gob.NewEncoder(&encoded)
+	err := enc.Encode(t)
+	if err != nil {
+		log.Panic(err)
+	}
+	hash = sha256.Sum256(encoded.Bytes())
 	t.ID = hash[:]
+}
+
+func (t *Transaction) IsCoinbase() bool {
+	// 判断是否是创世交易
+	return len(t.Vin) == 1 && len(t.VOut) == 1 && t.Vin[0].TxId == nil && t.Vin[0].VOut == -1
 }
 
 type TXInput struct {
@@ -38,11 +48,21 @@ type TXInput struct {
 	ScriptSig string
 }
 
+// CanUnlockOutputWith 判断这笔输入交易的钱的钱是否来自于我
+func (txIn *TXInput) CanUnlockOutputWith(address string) bool {
+	return txIn.ScriptSig == address
+}
+
 type TXOutput struct {
 	// 输出交易的值
 	Value int
 	// 锁定输出交易的脚本
 	ScriptPubKey string
+}
+
+// CanBeUnlockedWith 判断这笔输出交易的钱是否能被我解锁,是否是给我的钱。
+func (txOut *TXOutput) CanBeUnlockedWith(address string) bool {
+	return txOut.ScriptPubKey == address
 }
 
 func NewCoinbaseTX(to, data string) *Transaction {
@@ -56,4 +76,37 @@ func NewCoinbaseTX(to, data string) *Transaction {
 	tx.SetID()
 
 	return &tx
+}
+
+func NewUTXOTransaction(from, to string, amount int, bc *Blockchain) *Transaction {
+	var (
+		inputs  []TXInput
+		outputs []TXOutput
+	)
+
+	acc, validOutputs := bc.FindSpendableOutputs(from, amount)
+	if acc < amount {
+		log.Panic("not enough funds")
+	}
+
+	for transactionId, outs := range validOutputs {
+		txID, err := hex.DecodeString(transactionId)
+		if err != nil {
+			log.Panic(err)
+		}
+
+		for _, out := range outs {
+			input := TXInput{txID, out, from}
+			inputs = append(inputs, input)
+		}
+	}
+
+	if acc > amount {
+		outputs = append(outputs, TXOutput{acc - amount, from})
+	}
+
+	transaction := &Transaction{nil, inputs, outputs}
+	transaction.SetID()
+
+	return transaction
 }
